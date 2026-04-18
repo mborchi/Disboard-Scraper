@@ -61,8 +61,8 @@ class DiscordSender {
                 avatar_url: 'https://disboard.org/images/logo.png'
             });
 
-            console.log(`Webhookで送信完了: ${inviteData.title}`);
-            return response.status === 204;
+            console.log(`Webhookで送信完了: ${inviteData.title} (status=${response.status})`);
+            return response.status >= 200 && response.status < 300;
         } catch (error) {
             console.error('Webhook送信エラー:', error.response?.data || error.message);
             return false;
@@ -114,7 +114,7 @@ class DiscordSender {
         }
     }
 
-    async sendMultipleInvites(inviteList, maxPerBatch = 5) {
+    async sendMultipleInvites(inviteList, maxPerBatch = 5, onSuccess = null) {
         console.log(`${inviteList.length}個の招待リンクを送信中...`);
         
         const batches = [];
@@ -122,27 +122,36 @@ class DiscordSender {
             batches.push(inviteList.slice(i, i + maxPerBatch));
         }
 
-        let successCount = 0;
+        const successfullySent = [];
         for (let i = 0; i < batches.length; i++) {
             const batch = batches[i];
             console.log(`バッチ ${i + 1}/${batches.length} を処理中...`);
             
             for (const invite of batch) {
                 const success = await this.sendInvite(invite);
-                if (success) successCount++;
+                if (success) {
+                    successfullySent.push(invite);
+                    if (typeof onSuccess === 'function') {
+                        try {
+                            await onSuccess(invite);
+                        } catch (err) {
+                            console.error('送信成功コールバックでエラーが発生しました:', err.message);
+                        }
+                    }
+                }
                 
-                // レート制限を避けるため待機
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                // Discordへの連続送信を少し緩和
+                await new Promise(resolve => setTimeout(resolve, 500));
             }
             
-            // バッチ間の待機
-            if (i < batches.length - 1) {
+            // バッチ間の待機は大きなバッチを使うときだけ必要
+            if (maxPerBatch > 1 && i < batches.length - 1) {
                 await new Promise(resolve => setTimeout(resolve, 5000));
             }
         }
 
-        console.log(`${successCount}/${inviteList.length}個の招待リンクを送信完了`);
-        return successCount;
+        console.log(`${successfullySent.length}/${inviteList.length}個の招待リンクを送信完了`);
+        return successfullySent;
     }
 
     async close() {

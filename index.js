@@ -9,6 +9,7 @@ class DisboardBot {
         this.scraper = new DisboardScraper();
         this.sender = new DiscordSender();
         this.dataFile = path.join(__dirname, 'data', 'sent_links.json');
+        this.textFile = path.join(__dirname, 'data', 'sent_links.txt');
         this.isRunning = false;
     }
 
@@ -36,6 +37,26 @@ class DisboardBot {
         }
     }
 
+    async appendSentLinksTxt(invites) {
+        if (!invites || invites.length === 0) {
+            return;
+        }
+
+        const lines = invites.map(invite => {
+            const title = invite.title.replace(/\r?\n/g, ' ').trim();
+            const category = (invite.category || '未分類').replace(/\r?\n/g, ' ').trim();
+            const date = new Date(invite.scrapedAt).toISOString();
+            return `${date} | ${title} | ${category} | ${invite.link}`;
+        }).join('\n') + '\n';
+
+        try {
+            await fs.appendFile(this.textFile, lines, 'utf8');
+            console.log(`TXTファイルに${invites.length}件を追記しました: ${this.textFile}`);
+        } catch (error) {
+            console.error('TXTファイルへの保存エラー:', error.message);
+        }
+    }
+
     async loadSentLinks() {
         try {
             const data = await fs.readFile(this.dataFile, 'utf8');
@@ -44,6 +65,7 @@ class DisboardBot {
             console.log(`${sentData.length}個の送信済みリンクを読み込みました`);
         } catch (error) {
             console.log('送信済みリンクファイルがありません。新規作成します');
+            this.sender.sentLinks = new Set(); // Inicializar como Set vacío
             await this.saveSentLinks();
         }
     }
@@ -83,33 +105,31 @@ class DisboardBot {
 
             console.log(`${newInvites.length}個の新しい招待リンクを検出`);
 
-            // 招待リンクの有効性を検証（オプション）
-            const validInvites = [];
-            for (const invite of newInvites) {
-                const isValid = await this.scraper.validateInviteLink(invite.link);
-                if (isValid) {
-                    validInvites.push(invite);
-                } else {
-                    console.log(`無効な招待リンクをスキップ: ${invite.title}`);
-                }
-                
-                // 検証のレート制限
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-
-            if (validInvites.length === 0) {
-                console.log('有効な招待リンクはありませんでした');
-                return;
-            }
+            // Para mayor velocidad, saltar validación (asumir válidos)
+            const validInvites = newInvites;
 
             // Discordに送信
-            const successCount = await this.sender.sendMultipleInvites(validInvites, 3);
-            
-            // 送信済みリンクを保存
-            await this.saveSentLinks();
-            
+            const sentInvites = [];
+            for (const invite of validInvites) {
+                console.log(`Sending invite now: ${invite.title} -> ${invite.link}`);
+                const success = await this.sender.sendInvite(invite);
+                if (!success) {
+                    console.log(`送信失敗: ${invite.link}`);
+                    continue;
+                }
+
+                this.sender.sentLinks.add(invite.link);
+                await this.saveSentLinks();
+                await this.appendSentLinksTxt([invite]);
+                sentInvites.push(invite);
+                console.log(`保存しました: ${invite.link}`);
+
+                // 連続送信の間に少し待機
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+
             console.log(`=== スクレイピング完了 ===`);
-            console.log(`${successCount}/${validInvites.length}個の招待リンクを送信しました`);
+            console.log(`${sentInvites.length}/${validInvites.length}個の招待リンクを送信しました`);
 
         } catch (error) {
             console.error('スクレイピングエラー:', error);

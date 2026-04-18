@@ -43,10 +43,7 @@ class DisboardBot {
         }
 
         const lines = invites.map(invite => {
-            const title = invite.title.replace(/\r?\n/g, ' ').trim();
-            const category = (invite.category || '未分類').replace(/\r?\n/g, ' ').trim();
-            const date = new Date(invite.scrapedAt).toISOString();
-            return `${date} | ${title} | ${category} | ${invite.link}`;
+            return invite.link;
         }).join('\n') + '\n';
 
         try {
@@ -93,43 +90,38 @@ class DisboardBot {
             const maxPages = options.maxPages || 3;
             const category = options.category || null;
             
-            await this.scraper.scrapeMultiplePages(maxPages, category);
-            
-            // 新しい招待リンクを取得
-            const newInvites = this.scraper.getNewInvites();
-            
-            if (newInvites.length === 0) {
-                console.log('新しい招待リンクはありませんでした');
-                return;
-            }
+            let sentCount = 0;
+            let newCount = 0;
 
-            console.log(`${newInvites.length}個の新しい招待リンクを検出`);
-
-            // Para mayor velocidad, saltar validación (asumir válidos)
-            const validInvites = newInvites;
-
-            // Discordに送信
-            const sentInvites = [];
-            for (const invite of validInvites) {
+            const onInviteFound = async (invite) => {
+                // Si el enlace ya fue enviado, lo ignoramos de inmediato
+                if (this.sender.sentLinks.has(invite.link)) {
+                    return;
+                }
+                
+                newCount++;
                 console.log(`Sending invite now: ${invite.title} -> ${invite.link}`);
                 const success = await this.sender.sendInvite(invite);
                 if (!success) {
                     console.log(`送信失敗: ${invite.link}`);
-                    continue;
+                    return;
                 }
 
                 this.sender.sentLinks.add(invite.link);
                 await this.saveSentLinks();
                 await this.appendSentLinksTxt([invite]);
-                sentInvites.push(invite);
+                sentCount++;
                 console.log(`保存しました: ${invite.link}`);
 
                 // 連続送信の間に少し待機
                 await new Promise(resolve => setTimeout(resolve, 500));
-            }
+            };
+            
+            // Pasamos nuestra función callback para que se ejecute página por página, enlace por enlace
+            await this.scraper.scrapeMultiplePages(maxPages, category, onInviteFound);
 
             console.log(`=== スクレイピング完了 ===`);
-            console.log(`${sentInvites.length}/${validInvites.length}個の招待リンクを送信しました`);
+            console.log(`${sentCount}/${newCount}個の新しい招待リンクを送信しました`);
 
         } catch (error) {
             console.error('スクレイピングエラー:', error);

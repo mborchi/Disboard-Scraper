@@ -36,17 +36,17 @@ function sanitizeDiscordInviteUrl(url) {
 
 class DisboardScraper {
     constructor() {
-        this.baseUrl = 'https://disboard.org/ja';
+        this.baseUrl = 'https://disboard.org/en';
         this.inviteLinks = new Set();
         this.sentLinks = new Set();
         this.flaresolverrUrl = 'http://localhost:8191/v1';
     }
 
-    async scrapeDisboardServers(page = 1, category = null) {
+    async scrapeDisboardServers(page = 1, category = null, onInviteFound = null) {
         console.log(`Disboardからサーバーをスクレイピング中... ページ: ${page}`);
         
         try {
-            const baseUrls = [this.baseUrl, 'https://disboard.org/en', 'https://disboard.org/servers'];
+            const baseUrls = [this.baseUrl, 'https://disboard.org/es', 'https://disboard.org/servers'];
             const flaresolverrUrl = 'http://localhost:8191/v1';
             let response = null;
             let lastError = null;
@@ -122,35 +122,65 @@ class DisboardScraper {
             const servers = [];
             const listingCards = $('.listing-card').toArray();
             console.log(`Página recibida, servidores listados: ${listingCards.length}`);
-            
-            for (const element of listingCards) {
+
+            // --- Lógica de Concurrencia Limitada ---
+            // En lugar de procesar uno por uno con una pausa, procesamos varios a la vez.
+            // Un valor de 2 o 3 es seguro para no sobrecargar FlareSolverr. Si falla, prueba con 1.
+            const CONCURRENCY_LIMIT = 2;
+
+            const jobs = listingCards.map((element, i) => {
                 const title = $(element).find('.server-name').text().trim();
                 const description = $(element).find('.server-description').text().trim();
                 const categoryText = $(element).find('.server-tags').text().trim();
                 const classAttr = $(element).attr('class') || '';
                 const serverIdMatch = classAttr.match(/server-(\d+)/);
                 const serverId = serverIdMatch ? serverIdMatch[1] : null;
-
-                if (!serverId) {
-                    continue;
-                }
+                if (!serverId) return null;
 
                 const joinUrl = `https://disboard.org/server/join/${serverId}`;
-                console.log(`Fetching invite for server: ${title} (${joinUrl})`);
-                const inviteLink = await this.getInviteFromJoinPage(joinUrl);
-                if (!inviteLink) {
-                    console.log(`No invite link found for server: ${title}`);
-                    continue;
+                return { index: i, title, description, categoryText, joinUrl };
+            }).filter(Boolean);
+
+            const runningPromises = new Set();
+            const allPromises = [];
+            let processedCount = 0;
+
+            for (const job of jobs) {
+                while (runningPromises.size >= CONCURRENCY_LIMIT) {
+                    await Promise.race(runningPromises);
                 }
 
-                console.log(`Found invite for: ${title} -> ${inviteLink}`);
-                servers.push({
-                    title,
-                    inviteLink,
-                    description,
-                    category: categoryText
-                });
+                processedCount++;
+                console.log(`\n[${processedCount}/${jobs.length}] ⏳ Procesando: ${job.title}`);
+
+                const promise = (async () => {
+                    try {
+                        const inviteLink = await this.getInviteFromJoinPage(job.joinUrl);
+                        if (!inviteLink) {
+                            console.log(`[${processedCount}/${jobs.length}] ❌ No se encontró invitación para: ${job.title}`);
+                            return;
+                        }
+
+                        console.log(`[${processedCount}/${jobs.length}] ✅ Encontrado: ${job.title} -> ${inviteLink}`);
+                        const inviteData = { title: job.title, link: inviteLink, description: job.description, category: job.categoryText, scrapedAt: new Date().toISOString() };
+
+                        this.inviteLinks.add(inviteData);
+                        servers.push({ title: job.title, inviteLink, description: job.description, category: job.categoryText });
+
+                        if (onInviteFound) await onInviteFound(inviteData);
+
+                    } catch (err) {
+                        console.error(`[${processedCount}/${jobs.length}] ❌ Error procesando ${job.title}:`, err.message);
+                    }
+                })();
+
+                runningPromises.add(promise);
+                allPromises.push(promise);
+                promise.finally(() => runningPromises.delete(promise));
             }
+
+            // Esperar a que todos los trabajos de la página actual terminen antes de pasar a la siguiente
+            await Promise.allSettled(allPromises);
 
             console.log(`${servers.length}個のサーバーを検出しました`);
             
@@ -169,17 +199,6 @@ class DisboardScraper {
                 });
             }
             
-            // Agregar a inviteLinks
-            servers.forEach(server => {
-                this.inviteLinks.add({
-                    title: server.title,
-                    link: server.inviteLink,
-                    description: server.description,
-                    category: server.category,
-                    scrapedAt: new Date().toISOString()
-                });
-            });
-            
             return servers;
             
         } catch (error) {
@@ -188,11 +207,11 @@ class DisboardScraper {
         }
     }
 
-    async scrapeMultiplePages(maxPages = 5, category = null) {
+    async scrapeMultiplePages(maxPages = 5, category = null, onInviteFound = null) {
         console.log(`複数ページからスクレイピング開始... 最大${maxPages}ページ`);
         
         for (let page = 1; page <= maxPages; page++) {
-            await this.scrapeDisboardServers(page, category);
+            await this.scrapeDisboardServers(page, category, onInviteFound);
             // 少しだけ待機してFlareSolverrを安定させる
             if (page < maxPages) {
                 await new Promise(resolve => setTimeout(resolve, 500));
@@ -216,20 +235,20 @@ class DisboardScraper {
         try {
             console.log(`Requesting join page via FlareSolverr: ${joinUrl}`);
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000); // Increased to 30s
+            const timeoutId = setTimeout(() => controller.abort(), 95000); // 95s para el AbortController
 
             let response;
             try {
                 response = await axios.post(this.flaresolverrUrl, {
                     cmd: 'request.get',
                     url: joinUrl,
-                    maxTimeout: 20000,
+                    maxTimeout: 90000, // Aumentado a 90s para FlareSolverr
                     returnOnlyBody: false,
                     headers: {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
                         'Accept-Language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7'
                     }
-                }, { timeout: 20000, signal: controller.signal });
+                }, { timeout: 95000, signal: controller.signal }); // Aumentado a 95s para Axios
             } finally {
                 clearTimeout(timeoutId);
             }

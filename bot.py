@@ -5,6 +5,9 @@ import discord
 from discord.ext import tasks
 from scraper import fetch_servers
 from webserver import start_webserver
+from dotenv import load_dotenv
+
+load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
